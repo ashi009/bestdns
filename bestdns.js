@@ -3,7 +3,7 @@ var lib = require('./lib.js');
 var Pool = require('./pool.js');
 var pingSession = require('net-ping').createSession({
 	retries: 1,
-	timeout: 1000,
+	timeout: 500,
 	packetSize: 64
 });
 var parse = require('./parser.js');
@@ -17,6 +17,10 @@ var client = dgram.createSocket("udp4");
 var quires = {};
 var clientPool = new Pool(40, function(id) {
 	var entry = quires[id];
+  if (entry === undefined) {
+    console.error('%d expired.', id);
+    return;
+  }
 	var channel = -1;
   for (var i = 0; i < 2; i++)
     if (entry.results[i] === undefined) {
@@ -105,17 +109,26 @@ setInterval(function() {
     var entry = quires[id];
     if (entry.timeout >= now) {
       if (!entry.answered) {
+        clientPool.release();
+        var hasDelayResult = false;
         for (var i = 0; i < 2; i++)
-          if (entry.delays[i] !== undefined) {
+          if (entry.delays[i] > 0) {
+            hasDelayResult = true;
             sendResponse(id, i);
             break;
           }
-        clientPool.release();
+        if (!hasDelayResult) {
+          for (var i = 0; i < 2; i++)
+            if (entry.results[i]) {
+              sendResponse(id, i);
+              break;
+            }
+        }
       }
       delete quires[id];
     }
   }
-}, kTimeout);
+}, kTimeout * 2);
 
 client.on('message', function(buf, from) {
 	clientPool.release();
@@ -151,9 +164,15 @@ client.on('message', function(buf, from) {
 			return;
 		}
 	}
-	var ip = lib.toIPv4(msg.answers.random().ip);
-	entry.ips[channel] = ip;
-	pingIP(msg.id, ip);
+  if (msg.answers.length) {
+    var ip = lib.toIPv4(msg.answers.random().ip);
+    entry.ips[channel] = ip;
+    pingIP(msg.id, ip);
+  } else {
+    entry.ips[channel] = null;
+  }
+  if (entry.ips[channel ^ 1] === null)
+    sendResponse(msg.id, channel);
 });
 
 server.on("message", function(buf, from) {
